@@ -1,0 +1,825 @@
+---
+title: "Point patterns analysis of IBA1, CD45 and CD68 cells in the ischemic hemisphere following cerebral ischemia"
+subtitle: "Data analysis notebook"
+date: today
+date-format: full
+author: 
+  - name: "Daniel Manrique-Castano"
+    orcid: 0000-0002-1912-1764
+    degrees:
+      - PhD
+    affiliation: 
+      - name: Univerisity Laval 
+        department: Psychiatry and Neuroscience
+        group: Laboratory of neurovascular interactions 
+note: "GitHub: https://daniel-manrique.github.io/"
+keywords: 
+  - DKK1
+  - MCAO
+  - Brain injury
+  - Bayesian modeling 
+   
+license: "CC BY"
+
+format:
+   pdf: 
+    toc: true
+    number-sections: true
+    colorlinks: true
+   html:
+    code-fold: true
+    embed-resources: true
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    number-sections: true
+    theme: spacelab
+
+knitr:
+  opts_chunk: 
+    warning: false
+    message: false
+
+csl: science.csl
+bibliography: references.bib
+---
+
+This notebook develops point patterns analysis (PPA) for a set of points (xy coordinates) derived from CD45+ cells. The cells were unbiased detected using QuPath [@bankhead2017] and stored as .tsv files (`2024_DKK1_CellDetections`) that were processed to create point patterns (`2024_DKK1_Hyperfraes`).
+
+# 1. Install and load required packages
+
+First, we install and load the required libraries. To perform a first installation, please uncomment (erase #) the 'install.packages' line in the following chunk. For subsequent code execution, comment again the installation line.
+
+```{r}
+#| label: Install required packages
+#| include: true
+#| warning: false
+#| message: false
+
+# To install packcages uncomment the following line
+
+#install.packages(c("ggplot2","dpylr", "ggridges", "raincloudplots", "cowplot", "data.table", "ggrepel", "sjPlot", "bayesplot", "reshape2", "purrr", "tidyr", "brms", "emmeans", "modelr", "plyr", "pacthwork", "spatstat", "ggdist", "ggpubr", "bayesplot", "RandomFieldsUtils", "RandomFields"))
+
+#library(devtools)
+#install_github ("cran/RandomFields")
+
+library(brms)
+library(tidybayes)
+library(ggplot2)
+library(dplyr)
+library(landscapemetrics)
+library(modelr)
+library(patchwork)
+library(raster)
+library(spatstat)
+library(tidyr)
+```
+We load also a plot theme
+
+```{r}
+#| label: Plot_Theme
+#| include: true
+#| warning: false
+#| message: false
+  
+Plot_theme <- theme_classic() +
+  theme(
+      plot.title = element_text(size=18, hjust = 0.5, face="bold"),
+      plot.subtitle = element_text(size = 10, color = "black"),
+      plot.caption = element_text(size = 12, color = "black"),
+      axis.line = element_line(colour = "black", size = 1.5, linetype = "solid"),
+      axis.ticks.length=unit(7,"pt"),
+     
+      axis.title.x = element_text(colour = "black", size = 16),
+      axis.text.x = element_text(colour = "black", size = 16, angle = 0, hjust = 0.5),
+      axis.ticks.x = element_line(colour = "black", size = 1),
+      
+      axis.title.y = element_text(colour = "black", size = 16),
+      axis.text.y = element_text(colour = "black", size = 16),
+      axis.ticks.y = element_line(colour = "black", size = 1),
+      
+      legend.position="right",
+      legend.direction="vertical",
+      legend.title = element_text(colour="black", face="bold", size=12),
+      legend.text = element_text(colour="black", size=10),
+      
+      plot.margin = margin(t = 10,  # Top margin
+                             r = 2,  # Right margin
+                             b = 10,  # Bottom margin
+                             l = 10) # Left margin
+      ) 
+```
+
+# Analysis of CD45
+
+## Load the point patterns
+
+We load the `CD45_PointPatterns` file containing the point patterns for the detect cells.
+
+```{r}
+#| label: LoadPPP_CD45
+#| include: true
+#| warning: false
+#| message: false
+ 
+# Load hyperframes with point patterns
+PointPatterns <- readRDS("PointPatterns/CD45_PPP.rds")
+
+PointPatterns$Condition <- factor(PointPatterns$Condition, levels = c("Off", "ON")) 
+PointPatterns$CD45 <- with(PointPatterns, rotate.ppp(CD45, pi))
+
+# Calculate density kernels
+PointPatterns$CD45_Density <- with (PointPatterns, density(CD45, sigma = 0.1))
+
+```
+Now, we plot examples for the densities using the topo.colors colour map.
+
+```{r}
+
+Colmap <- colourmap(topo.colors(256), range = c(0, 4000))
+
+plot(PointPatterns$CD45_Density, col = Colmap)
+
+par(mar=c(1,1,1,1), oma=c(1,1,1,1))
+png("Plots/Denisty_M10.png", width = 300, height = 600)
+par(mar=c(1,1,1,1), oma=c(1,1,1,1))
+plot(PointPatterns$CD45_Density$M10, col = Colmap, main = "M10_ON")
+dev.off()
+
+```
+## Calculate tesselations we create Tessellations and quadrant counts
+
+```{r}
+# Calculate tessellations
+Cells_Quantiles <- c(0, 1000, 4000)
+PointPatterns$CD45_Tess <- with (PointPatterns, cut(CD45_Density, breaks = Cells_Quantiles, labels = c ("Low", "High")))
+
+PointPatterns$CD45_Counts <- with(PointPatterns, quadratcount(CD45, tess = CD45_Tess))
+```
+
+Next, we organize a table with the quadrant counts
+
+```{r}
+Counts <- as.data.frame(PointPatterns$CD45_Counts)
+
+Counts_long <- pivot_longer(
+  Counts,
+  cols = everything(),
+  names_to = c("Tile", ".value"),
+  names_pattern = "(M\\d+)\\.(.*)"
+)
+
+# Add 'Condition' column with repeating patterns
+Counts_long <- Counts_long  %>%
+  mutate(Condition = rep(c("Off", "ON", "Off", "ON"), times = c(6, 4, 6, 4)))
+
+# View the updated dataframe
+print(Counts_long)
+
+
+Counts_long_sub <- Counts_long[Counts_long$tile == "High",] 
+```
+## Statistical modeling
+
+```{r}
+library(fitdistrplus)
+
+CD45.nbinom <- fitdist(Counts_long_sub$Freq, "nbinom")
+CD45.pois <- fitdist(Counts_long_sub$Freq, "pois")
+CD45.norm <- fitdist(Counts_long_sub$Freq, "norm")
+
+
+bac.cdf <- cdfcomp(list(CD45.nbinom, CD45.pois,CD45.norm),
+                main="",legendtext=c("nbinom","pois", "norm"),
+                fitcol = c("black", "red", "blue"),
+                plotstyle ="ggplot")+
+geom_line(linewidth=1.2)+
+theme(axis.title=element_text(size=18),
+axis.text = element_text(size=16),
+legend.position = c(0.8,0.25),
+legend.text=element_text(size=14))
+
+bac.cdf
+```
+
+## Fit the model for cell counts
+
+```{r}
+
+CD45_Mdl1 <- bf(Freq ~ Condition)
+
+get_prior(CD45_Mdl1, data = Counts_long_sub, family = student)
+
+# Fit model 1
+CD45_Fit1 <- 
+  brm(
+    data    = Counts_long_sub,
+    family  = student,
+    formula = CD45_Mdl1,
+    chains  = 4,
+    cores   = 4,
+    warmup  = 2500, 
+    iter    = 5000, 
+    seed    = 8807,
+    control = list(adapt_delta = 0.99, max_treedepth = 15),
+    file    = "Models/CD45_Fit1.rds",
+    file_refit = "never") 
+
+# Add criteria for comparison
+CD45_Fit1 <- 
+  add_criterion(CD45_Fit1, c("loo", "waic", "bayes_R2"))
+
+```
+## Plot the results
+
+```{r}
+
+
+CD45_fig <- Counts_long_sub %>%
+  data_grid(Condition) %>%
+  add_epred_draws(CD45_Fit1) %>%
+  ggplot(aes(x = .epred, y = Condition, fill = after_stat(abs(x) < 3474))) +
+  geom_vline(xintercept = c(1220, 3474), linetype = "dashed") +
+  stat_pointinterval(.width = c(.66, .95)) +
+  stat_halfeye() +
+  scale_fill_manual(
+    name="ROPE", 
+    values = c("gray80", "skyblue"),
+    labels = c("False", "True")) +
+  scale_x_continuous(name = "Number of CD45+ cells") +
+  theme_classic() +
+  Plot_theme +
+  theme (legend.position = c(0.8, 0.3))
+
+ggsave(plot = CD45_fig , 
+       "Plots/CD45_Counts.png", 
+       width = 11, 
+       height = 9, 
+       units = "cm")
+  
+```
+
+## Analysis of the relative distribution (x-axis) 
+
+We analyze the distribution of CD45+ cells conditional on the x-axis.
+
+```{r}
+#| label: CD45_Rohat
+#| include: true
+#| warning: false
+#| message: false
+
+CD45_ON <- subset(PointPatterns, Condition=="ON", select = 1:5)
+CD45_Off <- subset(PointPatterns, Condition=="Off", select = 1:5)
+
+CD45_ON_Rohat <- with(CD45_ON, spatstat.explore::rhohat.ppp(CD45, "x", do.CI = FALSE))
+CD45_ON_Rohat <- pool(CD45_ON_Rohat)
+
+CD45_Off_Rohat <- with(CD45_Off, spatstat.explore::rhohat.ppp(CD45, "x", do.CI = FALSE))
+CD45_Off_Rohat <- pool(CD45_Off_Rohat)
+```
+
+### Plot the rhohat
+
+```{r}
+#| label: PlotRhohat_CD45 
+#| include: true
+#| warning: false
+#| message: false
+#| layout-nrow: 1
+#| fig-width: 20
+#| fig-height: 5
+
+## For DKK1 ON
+
+png("Plots/DKK1_ON.png", width = 600, height = 400)
+par(mar=c(5,8,0.5,0.5)+2)
+plot(CD45_ON_Rohat,
+     shade = c("lorho", "hirho"),
+     las=1,
+     legendargs=list(xpd=TRUE),
+     main = "ON",
+     ylim =c(0, 3000),
+     xlab = "",
+     ylab = "",
+     cex.main = 2.5,
+     cex.lab = 2.5,
+     cex.axis = 2.5,
+     lwd = 3,
+     legend=FALSE,
+     xaxt = "n",
+     yaxt = "n")
+     #col = "black")
+
+# Add 'lorho' and 'hirho' lines with specific colors
+#lines(CD45_ON_Rohat$x, CD45_ON_Rohat$poolave, col="black", lwd=3, lty = 3)
+#lines(CD45_ON_Rohat$x, CD45_ON_Rohat$loave, col="black", lwd=3, lty = 1)
+#lines(CD45_ON_Rohat$x, CD45_ON_Rohat$hiave, col="black", lwd=3, lty = 1)
+
+axis(1, at = seq(-2, 0, 0.5), labels = c("0", "0.5", "1", "1.5",  "2"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5)
+
+axis(2, at = seq(0, 3000, 600), labels = c("0","600", "1200", "1800", "2400", "3000"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5, las = 2)
+
+title(xlab = "X coordinates", mgp = c(4.5, 1, 0), cex.lab = 2.5)   
+title(ylab = "p(CD45)", mgp = c(7, 1, 0), cex.lab = 2.5) 
+
+dev.off()
+
+
+## For DKK1 ON
+png("Plots/DKK1_Off.png", width = 600, height = 400)
+par(mar=c(5,8,0.5,0.5)+2)
+plot(CD45_Off_Rohat,
+     shade = c("lorho", "hirho"),
+     las=1,
+     legendargs=list(xpd=TRUE),
+     main = "Off",
+     ylim =c(0, 3000),
+     xlab = "",
+     ylab = "",
+     cex.main = 2.5,
+     cex.lab = 2.5,
+     cex.axis = 2.5,
+     lwd = 3,
+     legend=FALSE,
+     xaxt = "n",
+     yaxt = "n")
+     #col = "black")
+
+# Add 'lorho' and 'hirho' lines with specific colors
+#lines(CD45_Off_Rohat$x, CD45_Off_Rohat$poolave, col="black", lwd=3, lty = 3)
+#lines(CD45_Off_Rohat$x, CD45_Off_Rohat$loave, col="black", lwd=3, lty = 1)
+#lines(CD45_Off_Rohat$x, CD45_Off_Rohat$hiave, col="black", lwd=3, lty = 1)
+
+axis(1, at = seq(-2, 0, 0.5), labels = c("0", "0.5", "1", "1.5",  "2"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5)
+
+axis(2, at = seq(0, 3000, 600), labels = c("0","600", "1200", "1800", "2400", "3000"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5, las = 2)
+
+title(xlab = "X coordinates", mgp = c(4.5, 1, 0), cex.lab = 2.5)   
+title(ylab = "p(CD45)", mgp = c(7, 1, 0), cex.lab = 2.5)
+dev.off()
+```
+
+## Fit the mppm model
+
+```{r}
+#| label: Modeling_CD45
+#| include: true
+#| warning: false
+#| message: false
+
+CD45_mppm1 <- mppm(CD45 ~ 0 + Condition, data = PointPatterns)
+CD45_mppm1_Coeff <- round(exp(coef(CD45_mppm1)), digits = 2)
+CD45_mppm1_CI <- round(exp(confint(CD45_mppm1)), digits = 2)
+
+CD45_mppm2 <- mppm(CD45 ~ 0 + Condition * x, data = PointPatterns)
+CD45_mppm2_Coeff <- round(exp(coef(CD45_mppm2)), digits = 2)
+CD45_mppm2_CI <- round(exp(confint(CD45_mppm2)), digits = 2)
+```
+
+
+# Analysis of Iba1
+
+## Load the point patterns
+
+We load the `Iba1_PointPatterns` file containing the point patterns for the detect cells.
+
+```{r}
+#| label: LoadPPP_Iba1
+#| include: true
+#| warning: false
+#| message: false
+ 
+# Load hyperframes with point patterns
+PointPatterns <- readRDS("PointPatterns/Iba1_PPP.rds")
+
+PointPatterns$Condition <- factor(PointPatterns$Condition, levels = c("Off", "ON")) 
+PointPatterns$Iba1 <- with(PointPatterns, rotate.ppp(Iba1, pi))
+
+# Calculate density kernels
+PointPatterns$Iba1_Density <- with (PointPatterns, density(Iba1, sigma = 0.1))
+plot(PointPatterns$Iba1_Density)
+
+```
+
+```{r}
+Colmap <- colourmap(topo.colors(256), range = c(0, 25000))
+
+plot(PointPatterns$Iba1_Density, col = Colmap)
+
+par(mar=c(1,1,1,1), oma=c(1,1,1,1))
+png("Plots/Density_Iba1_M11.png", width = 300, height = 600)
+par(mar=c(1,1,1,1), oma=c(1,1,1,1))
+plot(PointPatterns$Iba1_Density$M11, col = Colmap, main = "M11_ON")
+dev.off()
+
+```
+
+
+
+
+
+## Calculate tesselations we create Tessellations and quadrant counts
+
+```{r}
+# Calculate tessellations
+Cells_Quantiles <- c(0, 5000, 40000)
+PointPatterns$Iba1_Tess <- with (PointPatterns, cut(Iba1_Density, breaks = Cells_Quantiles, labels = c ("Low", "High")))
+
+plot(PointPatterns$Iba1_Tess)
+
+PointPatterns$Iba1_Counts <- with(PointPatterns, quadratcount(Iba1, tess = Iba1_Tess))
+```
+
+Next, we organize a table with the quadrant counts
+
+```{r}
+Counts <- as.data.frame(PointPatterns$Iba1_Counts)
+
+Counts_long <- pivot_longer(
+  Counts,
+  cols = everything(),
+  names_to = c("Tile", ".value"),
+  names_pattern = "(M\\d+)\\.(.*)"
+)
+
+# Add 'Condition' column with repeating patterns
+Counts_long <- Counts_long  %>%
+  mutate(Condition = rep(c("Off", "ON", "Off", "ON"), times = c(6, 5, 6, 5)))
+
+# View the updated dataframe
+print(Counts_long)
+
+
+Counts_long_sub <- Counts_long[Counts_long$tile == "High",] 
+```
+## Statistical modeling
+
+```{r}
+library(fitdistrplus)
+
+Iba1.nbinom <- fitdist(Counts_long_sub$Freq, "nbinom")
+Iba1.pois <- fitdist(Counts_long_sub$Freq, "pois")
+Iba1.norm <- fitdist(Counts_long_sub$Freq, "norm")
+
+
+bac.cdf <- cdfcomp(list(Iba1.nbinom, Iba1.pois,Iba1.norm),
+                main="",legendtext=c("nbinom","pois", "norm"),
+                fitcol = c("black", "red", "blue"),
+                plotstyle ="ggplot")+
+geom_line(linewidth=1.2)+
+theme(axis.title=element_text(size=18),
+axis.text = element_text(size=16),
+legend.position = c(0.8,0.25),
+legend.text=element_text(size=14))
+
+bac.cdf
+```
+
+## Fit the model for cell counts
+
+```{r}
+
+Iba1_Mdl1 <- bf(Freq ~ Condition)
+
+get_prior(Iba1_Mdl1, data = Counts_long_sub, family = student)
+
+# Fit model 1
+Iba1_Fit1 <- 
+  brm(
+    data    = Counts_long_sub,
+    family  = student,
+    formula = Iba1_Mdl1,
+    chains  = 4,
+    cores   = 4,
+    warmup  = 2500, 
+    iter    = 5000, 
+    seed    = 8807,
+    control = list(adapt_delta = 0.99, max_treedepth = 15),
+    file    = "Models/Iba1_Fit1.rds",
+    file_refit = "never") 
+
+# Add criteria for comparison
+Iba1_Fit1 <- 
+  add_criterion(Iba1_Fit1, c("loo", "waic", "bayes_R2"))
+
+```
+## Plot the results
+
+```{r}
+
+
+Iba1_fig <-  Counts_long_sub %>%
+  data_grid(Condition) %>%
+  add_epred_draws(Iba1_Fit1) %>%
+  ggplot(aes(x = .epred, y = Condition, fill = after_stat(abs(x) < 20295))) +
+  geom_vline(xintercept = c(8111, 20295), linetype = "dashed") +
+  stat_pointinterval(.width = c(.66, .95)) +
+  stat_halfeye() +
+  scale_fill_manual(
+    name="ROPE", 
+    values = c("gray80", "skyblue"),
+    labels = c("False", "True")) +
+  scale_x_continuous(name = "Number of Iba1+ cells") +
+  theme_classic() +
+  Plot_theme +
+  theme (legend.position = c(0.8, 0.3))
+
+ggsave(plot = Iba1_fig , 
+       "Plots/Iba1_Counts.png", 
+       width = 11, 
+       height = 9, 
+       units = "cm")
+  
+  
+```
+
+## Analysis of the relative distribution (x-axis) 
+
+We analyze the distribution of Iba1+ cells conditional on the x-axis.
+
+```{r}
+#| label: Iba1_Rohat
+#| include: true
+#| warning: false
+#| message: false
+
+Iba1_ON <- subset(PointPatterns, Condition=="ON", select = 1:5)
+Iba1_Off <- subset(PointPatterns, Condition=="Off", select = 1:5)
+
+Iba1_ON_Rohat <- with(Iba1_ON, spatstat.explore::rhohat.ppp(Iba1, "x", do.CI = FALSE))
+Iba1_ON_Rohat <- pool(Iba1_ON_Rohat)
+
+Iba1_Off_Rohat <- with(Iba1_Off, spatstat.explore::rhohat.ppp(Iba1, "x", do.CI = FALSE))
+Iba1_Off_Rohat <- pool(Iba1_Off_Rohat)
+```
+
+### Plot the rhohat
+
+```{r}
+#| label: PlotRhohat_Iba1 
+#| include: true
+#| warning: false
+#| message: false
+#| layout-nrow: 1
+#| fig-width: 20
+#| fig-height: 5
+
+## For DKK1 ON
+
+png("Plots/Iba1_DKK1_ON.png", width = 600, height = 400)
+par(mar=c(5,8,0.5,0.5)+2)
+plot(Iba1_ON_Rohat,
+     shade = c("lorho", "hirho"),
+     las=1,
+     legendargs=list(xpd=TRUE),
+     main = "ON",
+     ylim =c(0, 10000),
+     xlab = "",
+     ylab = "",
+     cex.main = 2.5,
+     cex.lab = 2.5,
+     cex.axis = 2.5,
+     lwd = 3,
+     legend=FALSE,
+     xaxt = "n",
+     yaxt = "n")
+     #col = "black")
+
+# Add 'lorho' and 'hirho' lines with specific colors
+#lines(Iba1_ON_Rohat$x, Iba1_ON_Rohat$poolave, col="black", lwd=3, lty = 3)
+#lines(Iba1_ON_Rohat$x, Iba1_ON_Rohat$loave, col="black", lwd=3, lty = 1)
+#lines(Iba1_ON_Rohat$x, Iba1_ON_Rohat$hiave, col="black", lwd=3, lty = 1)
+
+axis(1, at = seq(-2.3, 0, 0.5), labels = c("0", "0.5", "1", "1.5",  "2"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5)
+
+axis(2, at = seq(0, 10000, 2000), labels = c("0","2000", "4000", "6000", "8000", "10000"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5, las = 2)
+
+title(xlab = "X coordinates", mgp = c(4.5, 1, 0), cex.lab = 2.5)   
+title(ylab = "p(IBA1)", mgp = c(7, 1, 0), cex.lab = 2.5) 
+
+dev.off()
+
+
+## For DKK1 ON
+png("Plots/Iba1_DKK1_Off.png", width = 600, height = 400)
+par(mar=c(5,8,0.5,0.5)+2)
+plot(Iba1_Off_Rohat,
+     shade = c("lorho", "hirho"),
+     las=1,
+     legendargs=list(xpd=TRUE),
+     main = "Off",
+     ylim =c(0, 10000),
+     xlab = "",
+     ylab = "",
+     cex.main = 2.5,
+     cex.lab = 2.5,
+     cex.axis = 2.5,
+     lwd = 3,
+     legend=FALSE,
+     xaxt = "n",
+     yaxt = "n")
+     #col = "black")
+
+# Add 'lorho' and 'hirho' lines with specific colors
+#lines(Iba1_Off_Rohat$x, Iba1_Off_Rohat$poolave, col="black", lwd=3, lty = 3)
+#lines(Iba1_Off_Rohat$x, Iba1_Off_Rohat$loave, col="black", lwd=3, lty = 1)
+#lines(Iba1_Off_Rohat$x, Iba1_Off_Rohat$hiave, col="black", lwd=3, lty = 1)
+
+axis(1, at = seq(-2, 0, 0.5), labels = c("0", "0.5", "1", "1.5",  "2"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5)
+
+axis(2, at = seq(0, 10000, 2000), labels = c("0","2000", "4000", "6000", "8000", "10000"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5, las = 2)
+
+title(xlab = "X coordinates", mgp = c(4.5, 1, 0), cex.lab = 2.5)   
+title(ylab = "p(IBA1)", mgp = c(7, 1, 0), cex.lab = 2.5)
+dev.off()
+```
+
+## Fit the mppm model
+
+```{r}
+#| label: Modeling_Iba1
+#| include: true
+#| warning: false
+#| message: false
+
+Iba1_mppm1 <- mppm(Iba1 ~ 0 + Condition, data = PointPatterns)
+Iba1_mppm1_Coeff <- round(exp(coef(Iba1_mppm1)), digits = 2)
+Iba1_mppm1_CI <- round(exp(confint(Iba1_mppm1)), digits = 2)
+
+Iba1_mppm2 <- mppm(Iba1 ~ 0 + Condition * x, data = PointPatterns)
+Iba1_mppm2_Coeff <- round(exp(coef(Iba1_mppm2)), digits = 2)
+Iba1_mppm2_CI <- round(exp(confint(Iba1_mppm2)), digits = 2)
+```
+
+
+# Analysis of CD68
+
+## Load the point patterns
+
+We load the `CD68_PointPatterns` file containing the point patterns for the detect cells.
+
+```{r}
+#| label: LoadPPP_CD68
+#| include: true
+#| warning: false
+#| message: false
+ 
+# Load hyperframes with point patterns
+PointPatterns <- readRDS("PointPatterns/CD68_PPP.rds")
+
+PointPatterns$Condition <- factor(PointPatterns$Condition, levels = c("Off", "On")) 
+PointPatterns$CD68 <- with(PointPatterns, rotate.ppp(CD68, pi))
+
+# Calculate density kernels
+PointPatterns$CD68_Density <- with (PointPatterns, density(CD68, sigma = 0.1))
+plot(PointPatterns$CD68_Density)
+
+```
+
+```{r}
+Colmap <- colourmap(topo.colors(256), range = c(0, 10000))
+
+plot(PointPatterns$CD68_Density, col = Colmap)
+
+par(mar=c(1,1,1,1), oma=c(1,1,1,1))
+png("Plots/Density_CD68_M10.png", width = 300, height = 600)
+par(mar=c(1,1,1,1), oma=c(1,1,1,1))
+plot(PointPatterns$CD68_Density$M10, col = Colmap, main = "M10_On")
+dev.off()
+
+```
+
+
+
+
+
+## Calculate tesselations we create Tessellations and quadrant counts
+
+```{r}
+# Calculate tessellations
+Cells_Quantiles <- c(0, 5000, 40000)
+PointPatterns$CD68_Tess <- with (PointPatterns, cut(CD68_Density, breaks = Cells_Quantiles, labels = c ("Low", "High")))
+
+plot(PointPatterns$CD68_Tess)
+
+PointPatterns$CD68_Counts <- with(PointPatterns, quadratcount(CD68, tess = CD68_Tess))
+```
+
+## Analysis of the relative distribution (x-axis) 
+
+We analyze the distribution of CD68+ cells conditional on the x-axis.
+
+```{r}
+#| label: CD68_Rohat
+#| include: true
+#| warning: false
+#| message: false
+
+CD68_ON <- subset(PointPatterns, Condition=="On", select = 1:5)
+CD68_Off <- subset(PointPatterns, Condition=="Off", select = 1:5)
+
+CD68_ON_Rohat <- with(CD68_ON, spatstat.explore::rhohat.ppp(CD68, "x", do.CI = FALSE))
+CD68_ON_Rohat <- pool(CD68_ON_Rohat)
+
+CD68_Off_Rohat <- with(CD68_Off, spatstat.explore::rhohat.ppp(CD68, "x", do.CI = FALSE))
+CD68_Off_Rohat <- pool(CD68_Off_Rohat)
+```
+
+### Plot the rhohat
+
+```{r}
+#| label: PlotRhohat_CD68 
+#| include: true
+#| warning: false
+#| message: false
+#| layout-nrow: 1
+#| fig-width: 20
+#| fig-height: 5
+
+## For DKK1 ON
+
+png("Plots/CD68_DKK1_ON.png", width = 600, height = 400)
+par(mar=c(5,8,0.5,0.5)+2)
+plot(CD68_ON_Rohat,
+     shade = c("lorho", "hirho"),
+     las=1,
+     legendargs=list(xpd=TRUE),
+     main = "ON",
+     ylim =c(0, 8000),
+     xlab = "",
+     ylab = "",
+     cex.main = 2.5,
+     cex.lab = 2.5,
+     cex.axis = 2.5,
+     lwd = 3,
+     legend=FALSE,
+     xaxt = "n",
+     yaxt = "n")
+     #col = "black")
+
+# Add 'lorho' and 'hirho' lines with specific colors
+#lines(CD68_ON_Rohat$x, CD68_ON_Rohat$poolave, col="black", lwd=3, lty = 3)
+#lines(CD68_ON_Rohat$x, CD68_ON_Rohat$loave, col="black", lwd=3, lty = 1)
+#lines(CD68_ON_Rohat$x, CD68_ON_Rohat$hiave, col="black", lwd=3, lty = 1)
+
+axis(1, at = seq(-2.3, 0, 0.5), labels = c("0", "0.5", "1", "1.5",  "2"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5)
+
+axis(2, at = seq(0, 8000, 2000), labels = c("0","2000", "4000", "6000", "8000"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5, las = 2)
+
+title(xlab = "X coordinates", mgp = c(4.5, 1, 0), cex.lab = 2.5)   
+title(ylab = "p(CD68)", mgp = c(7, 1, 0), cex.lab = 2.5) 
+
+dev.off()
+
+
+## For DKK1 Off
+png("Plots/CD68_DKK1_Off.png", width = 600, height = 400)
+par(mar=c(5,8,0.5,0.5)+2)
+plot(CD68_Off_Rohat,
+     shade = c("lorho", "hirho"),
+     las=1,
+     legendargs=list(xpd=TRUE),
+     main = "Off",
+     ylim =c(0, 8000),
+     xlab = "",
+     ylab = "",
+     cex.main = 2.5,
+     cex.lab = 2.5,
+     cex.axis = 2.5,
+     lwd = 3,
+     legend=FALSE,
+     xaxt = "n",
+     yaxt = "n")
+     #col = "black")
+
+# Add 'lorho' and 'hirho' lines with specific colors
+#lines(CD68_Off_Rohat$x, CD68_Off_Rohat$poolave, col="black", lwd=3, lty = 3)
+#lines(CD68_Off_Rohat$x, CD68_Off_Rohat$loave, col="black", lwd=3, lty = 1)
+#lines(CD68_Off_Rohat$x, CD68_Off_Rohat$hiave, col="black", lwd=3, lty = 1)
+
+axis(1, at = seq(-2, 0, 0.5), labels = c("0", "0.5", "1", "1.5",  "2"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5)
+
+axis(2, at = seq(0, 8000, 2000), labels = c("0","2000", "4000", "6000", "8000"), cex.axis=2.5, padj = 0.5, lwd.ticks = 5, las = 2)
+
+title(xlab = "X coordinates", mgp = c(4.5, 1, 0), cex.lab = 2.5)   
+title(ylab = "p(CD68)", mgp = c(7, 1, 0), cex.lab = 2.5)
+dev.off()
+```
+
+## Fit the mppm model
+
+```{r}
+#| label: Modeling_CD68
+#| include: true
+#| warning: false
+#| message: false
+
+CD68_mppm1 <- mppm(CD68 ~ 0 + Condition, data = PointPatterns)
+CD68_mppm1_Coeff <- round(exp(coef(CD68_mppm1)), digits = 2)
+CD68_mppm1_CI <- round(exp(confint(CD68_mppm1)), digits = 2)
+
+CD68_mppm2 <- mppm(CD68 ~ 0 + Condition * x, data = PointPatterns)
+CD68_mppm2_Coeff <- round(exp(coef(CD68_mppm2)), digits = 2)
+CD68_mppm2_CI <- round(exp(confint(CD68_mppm2)), digits = 2)
+```
